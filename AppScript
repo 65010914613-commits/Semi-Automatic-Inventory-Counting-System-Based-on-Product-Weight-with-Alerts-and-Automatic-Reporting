@@ -1,0 +1,183 @@
+var CHANNEL_ACCESS_TOKEN = "fc6jsGfNnosig1uR0WKYMrYkXg9g+wgv9K2JA97xxis/WKBj3It4LbJaCRpRHPIpa56q4GlJcyOU9qDQ+EkljyKKLq1uutm5p1b45c+hWH7lofVkab/g/+5B00LpnYPmWcoyN0Y1ZKXFcuyQvxsEogdB04t89/1O/w1cDnyilFU=";
+var USER_ID = "U1a584b63b59f9f860386eef48d08a5bc";
+
+var lastAlert = {};
+
+function doPost(e){
+
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Sheet1");
+
+  var data = JSON.parse(e.postData.contents);
+
+  /* =========================
+     1️⃣ ถ้ามาจาก LINE
+  ==========================*/
+
+  if(data.events){
+
+    var replyToken = data.events[0].replyToken;
+    var userText = data.events[0].message.text;
+
+    var result = checkStock(userText);
+
+    replyLine(replyToken,result);
+
+    return ContentService.createTextOutput("OK");
+
+  }
+
+  /* =========================
+     2️⃣ ถ้ามาจาก ESP32
+  ==========================*/
+
+  var timestamp = new Date();
+
+  var product_id = data.product_id;
+  var product_name = data.product_name;
+  var weight = Number(data.weight);
+  var quantity = Number(data.quantity);
+  var box = Number(data.box);
+
+  sheet.appendRow([
+    timestamp,
+    product_id,
+    product_name,
+    weight,
+    quantity,
+    box
+  ]);
+
+  checkLowStock(product_name, quantity);
+
+  return ContentService.createTextOutput("OK");
+
+}
+
+/* =========================
+   ค้นหา Stock
+=========================*/
+
+function checkStock(productName){
+
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Sheet1");
+
+  var data = sheet.getDataRange().getValues();
+
+  var qty = null;
+
+  for(var i=data.length-1;i>=1;i--){
+
+    if(data[i][2].toString().toLowerCase() == productName.toLowerCase()){
+
+      qty = data[i][4];
+      break;
+
+    }
+
+  }
+
+  if(qty == null){
+
+    return "ไม่พบสินค้า "+productName;
+
+  }
+
+  return productName+" คงเหลือ "+qty+" ชิ้น";
+
+}
+
+/* =========================
+   แจ้งเตือน Stock ต่ำ
+=========================*/
+
+function checkLowStock(product, quantity){
+
+  var threshold = 50;
+
+  if(quantity < threshold){
+
+    if(lastAlert[product] == quantity){
+      return;
+    }
+
+    lastAlert[product] = quantity;
+
+    var message =
+    "⚠️ Stock ต่ำ\n\n"+
+    "สินค้า: "+product+"\n"+
+    "คงเหลือ: "+quantity+" ชิ้น";
+
+    sendLineOA(message);
+
+  }
+
+}
+
+/* =========================
+   ส่งแจ้งเตือน LINE
+=========================*/
+
+function sendLineOA(message){
+
+  var url = "https://api.line.me/v2/bot/message/push";
+
+  var payload = {
+    "to": USER_ID,
+    "messages":[
+      {
+        "type":"text",
+        "text": message
+      }
+    ]
+  };
+
+  var options = {
+    "method":"post",
+    "headers":{
+      "Content-Type":"application/json",
+      "Authorization":"Bearer " + CHANNEL_ACCESS_TOKEN
+    },
+    "payload": JSON.stringify(payload)
+  };
+
+  UrlFetchApp.fetch(url, options);
+
+}
+
+/* =========================
+   ตอบ LINE เมื่อถาม Stock
+=========================*/
+
+function replyLine(replyToken,message){
+
+  var url = "https://api.line.me/v2/bot/message/reply";
+
+  var payload = {
+
+    replyToken: replyToken,
+
+    messages:[
+      {
+        "type":"text",
+        "text": message
+      }
+    ]
+
+  };
+
+  var options = {
+
+    "method":"post",
+
+    "headers":{
+      "Content-Type":"application/json",
+      "Authorization":"Bearer " + CHANNEL_ACCESS_TOKEN
+    },
+
+    "payload": JSON.stringify(payload)
+
+  };
+
+  UrlFetchApp.fetch(url, options);
+
+}
