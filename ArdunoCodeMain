@@ -1,0 +1,252 @@
+#define BLYNK_TEMPLATE_ID "YOUR_TEMPLATE_ID"
+#define BLYNK_DEVICE_NAME "SmartScale"
+#define BLYNK_AUTH_TOKEN "YOUR_AUTH_TOKEN"
+
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <BlynkSimpleEsp32.h>
+#include "HX711.h"
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+#define DT 18
+#define SCK 19
+
+HX711 scale;
+LiquidCrystal_I2C lcd(0x27,16,2);
+
+char ssid[] = "C715";
+char pass[] = "71571548";
+
+/* Google Script */
+
+String webhook="YOUR_SCRIPT_URL";
+
+/* Calibration */
+
+float calibration_factor=0.292;
+
+/* Product structure */
+
+struct Product{
+  String id;
+  String name;
+  float weight;
+  int perBox;
+};
+
+Product products[]={
+  {"A001","NUT",5.2,100},
+  {"B001","SCREW",8.5,80},
+  {"C001","WASHER",3.1,200}
+};
+
+int productCount=3;
+int currentProduct=0;
+
+/* variables */
+
+float stableWeight=0;
+int stableCount=0;
+
+int lastQty=-1;
+
+unsigned long lastSend=0;
+unsigned long lastWiFiCheck=0;
+
+BlynkTimer timer;
+
+/* WIFI */
+
+void connectWiFi(){
+
+  if(WiFi.status()==WL_CONNECTED) return;
+
+  Serial.println("Connecting WiFi");
+
+  WiFi.begin(ssid,pass);
+
+  int timeout=0;
+
+  while(WiFi.status()!=WL_CONNECTED){
+
+    delay(500);
+    Serial.print(".");
+
+    timeout++;
+
+    if(timeout>20){
+      ESP.restart();
+    }
+
+  }
+
+  Serial.println("WiFi Connected");
+
+}
+
+/* SEND DATA */
+
+void sendData(float weight,int qty,int box){
+
+  if(WiFi.status()!=WL_CONNECTED) return;
+
+  HTTPClient http;
+
+  http.begin(webhook);
+
+  http.addHeader("Content-Type","application/json");
+
+  String json=
+  "{"
+  "\"product_id\":\""+products[currentProduct].id+"\","
+  "\"product_name\":\""+products[currentProduct].name+"\","
+  "\"weight\":"+String(weight)+","
+  "\"quantity\":"+String(qty)+","
+  "\"box\":"+String(box)+
+  "}";
+
+  int code=http.POST(json);
+
+  Serial.println(json);
+
+  Serial.print("HTTP:");
+  Serial.println(code);
+
+  http.end();
+
+}
+
+/* READ SCALE */
+
+void readScale(){
+
+  float weight=scale.get_units(20);
+
+  if(weight<3) weight=0;
+
+  float perItem=products[currentProduct].weight;
+
+  int qty=weight/perItem;
+
+  int box=qty/products[currentProduct].perBox;
+
+  /* weight stability */
+
+  if(abs(weight-stableWeight)<2){
+
+    stableCount++;
+
+  }else{
+
+    stableCount=0;
+
+  }
+
+  stableWeight=weight;
+
+  /* LCD */
+
+  lcd.clear();
+
+  lcd.setCursor(0,0);
+  lcd.print(products[currentProduct].name);
+
+  lcd.setCursor(0,1);
+  lcd.print(qty);
+  lcd.print(" pcs");
+
+  /* BLYNK */
+
+  Blynk.virtualWrite(V0,weight);
+  Blynk.virtualWrite(V1,qty);
+  Blynk.virtualWrite(V2,box);
+  Blynk.virtualWrite(V3,products[currentProduct].name);
+
+  /* SEND DATA */
+
+  if(stableCount>=5){
+
+    if(qty!=lastQty){
+
+      if(millis()-lastSend>5000){
+
+        sendData(weight,qty,box);
+
+        lastQty=qty;
+        lastSend=millis();
+
+      }
+
+    }
+
+  }
+
+}
+
+/* PRODUCT SELECT FROM BLYNK */
+
+BLYNK_WRITE(V4){
+
+  currentProduct=param.asInt();
+
+  Serial.print("Product changed to:");
+
+  Serial.println(products[currentProduct].name);
+
+}
+
+/* TARE BUTTON */
+
+BLYNK_WRITE(V5){
+
+  int state=param.asInt();
+
+  if(state==1){
+
+    scale.tare();
+
+    Serial.println("Tare Done");
+
+  }
+
+}
+
+void setup(){
+
+  Serial.begin(115200);
+
+  lcd.init();
+  lcd.backlight();
+
+  lcd.print("Smart Scale");
+
+  scale.begin(DT,SCK);
+
+  scale.set_scale(calibration_factor);
+
+  scale.tare();
+
+  connectWiFi();
+
+  Blynk.begin(BLYNK_AUTH_TOKEN,ssid,pass);
+
+  timer.setInterval(1000L,readScale);
+
+}
+
+void loop(){
+
+  if(millis()-lastWiFiCheck>10000){
+
+    connectWiFi();
+
+    lastWiFiCheck=millis();
+
+  }
+
+  Blynk.run();
+
+  timer.run();
+
+}
