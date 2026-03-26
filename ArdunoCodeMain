@@ -1,13 +1,19 @@
-#define BLYNK_TEMPLATE_ID "YOUR_TEMPLATE_ID"
-#define BLYNK_DEVICE_NAME "SmartScale"
-#define BLYNK_AUTH_TOKEN "YOUR_AUTH_TOKEN"
-
 #include <WiFi.h>
 #include <HTTPClient.h>
-#include <BlynkSimpleEsp32.h>
 #include "HX711.h"
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
+#include <ArduinoJson.h>
+
+/* BLYNK */
+
+#define BLYNK_TEMPLATE_ID "TMPL68yQbkJQD"
+#define BLYNK_TEMPLATE_NAME "SmartInventory"
+#define BLYNK_AUTH_TOKEN "W_8ITKJoBYk2YAQcRSM_mXL05Bat_tdp"
+
+#include <BlynkSimpleEsp32.h>
+
+/* HX711 */
 
 #define DT 18
 #define SCK 19
@@ -15,202 +21,182 @@
 HX711 scale;
 LiquidCrystal_I2C lcd(0x27,16,2);
 
-char ssid[] = "C715";
-char pass[] = "71571548";
+/* WIFI */
 
-/* Google Script */
+char ssid[]="MyT";
+char pass[]="00000000";
 
-String webhook="YOUR_SCRIPT_URL";
+/* GOOGLE SCRIPT */
 
-/* Calibration */
+String GAS_URL="https://script.google.com/macros/s/AKfycbxuG-SrBvjuTzRPxMrN9DuD84IFSJEqUe290pk-1HPNAR9L-3bBuPARu4mtIV3YFJjD4A/exec";
 
-float calibration_factor=0.292;
+/* CALIBRATION */
 
-/* Product structure */
+float calibration_factor = -1062511.17259;
+
+/* PRODUCT STRUCT */
 
 struct Product{
   String id;
   String name;
   float weight;
   int perBox;
+  float tare;
+  int low;
 };
 
-Product products[]={
-  {"A001","NUT",5.2,100},
-  {"B001","SCREW",8.5,80},
-  {"C001","WASHER",3.1,200}
-};
+Product products[20];
 
-int productCount=3;
+int productCount=0;
 int currentProduct=0;
 
-/* variables */
+/* SAVE CONTROL */
 
-float stableWeight=0;
-int stableCount=0;
+float lastWeight=0;
+bool dataSaved=false;
+unsigned long stableTimer=0;
 
-int lastQty=-1;
-
-unsigned long lastSend=0;
-unsigned long lastWiFiCheck=0;
-
-BlynkTimer timer;
-
-/* WIFI */
+/* WIFI CONNECT */
 
 void connectWiFi(){
 
-  if(WiFi.status()==WL_CONNECTED) return;
-
-  Serial.println("Connecting WiFi");
+  Serial.println("Connecting WiFi...");
 
   WiFi.begin(ssid,pass);
 
-  int timeout=0;
-
+  int retry = 0;                                      // ✅ แก้ไข #1: กันค้างตอน WiFi ต่อไม่ได้
   while(WiFi.status()!=WL_CONNECTED){
-
     delay(500);
     Serial.print(".");
-
-    timeout++;
-
-    if(timeout>20){
+    retry++;
+    if(retry > 20){                                   // รอสูงสุด 10 วินาที
+      Serial.println("\nWiFi Failed! Restarting...");
       ESP.restart();
     }
-
   }
 
-  Serial.println("WiFi Connected");
+  Serial.println("\nWiFi Connected");
 
 }
 
-/* SEND DATA */
+/* GET PRODUCT */
 
-void sendData(float weight,int qty,int box){
+void getProducts(){
 
-  if(WiFi.status()!=WL_CONNECTED) return;
+  Serial.println("Requesting product list...");
 
   HTTPClient http;
+  http.setTimeout(15000);                             // ✅ แก้ไข #2: เพิ่ม timeout เป็น 15 วินาที
 
-  http.begin(webhook);
+  String url=GAS_URL+"?mode=product";
 
-  http.addHeader("Content-Type","application/json");
+  http.begin(url);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
-  String json=
-  "{"
-  "\"product_id\":\""+products[currentProduct].id+"\","
-  "\"product_name\":\""+products[currentProduct].name+"\","
-  "\"weight\":"+String(weight)+","
-  "\"quantity\":"+String(qty)+","
-  "\"box\":"+String(box)+
-  "}";
+  int httpCode=http.GET();
 
-  int code=http.POST(json);
+  Serial.print("HTTP Code: ");                        // ✅ แก้ไข #3: เพิ่ม log ดู response
+  Serial.println(httpCode);
 
-  Serial.println(json);
+  if(httpCode==200){
 
-  Serial.print("HTTP:");
-  Serial.println(code);
+    String payload=http.getString();
+
+    Serial.println("Payload: "+payload);              // ดูว่าได้ข้อมูลอะไรกลับมา
+
+    StaticJsonDocument<2048> doc;
+    deserializeJson(doc,payload);
+
+    productCount=doc.size();
+
+    for(int i=0;i<productCount;i++){
+
+      products[i].id=doc[i]["id"].as<String>();
+      products[i].name=doc[i]["name"].as<String>();
+      products[i].weight = doc[i]["weight"].as<float>();
+      products[i].perBox = doc[i]["perbox"].as<int>();
+      products[i].tare   = doc[i]["tare"].as<float>();
+      products[i].low    = doc[i]["low"].as<int>();
+
+      Serial.println("----- PRODUCT LOADED -----");
+      Serial.print("Name: ");
+      Serial.println(products[i].name);
+      Serial.print("Weight: ");
+      Serial.println(products[i].weight);
+      Serial.print("Tare: ");
+      Serial.println(products[i].tare);
+      Serial.print("Low: ");
+      Serial.println(products[i].low);
+
+    }
+
+  } else {
+    Serial.print("HTTP Error: ");                     // ✅ แก้ไข #3: แสดง error แทน crash
+    Serial.println(httpCode);
+    Serial.println("Cannot load products, productCount = 0");
+    productCount = 0;                                 // ป้องกัน crash ถ้าโหลดไม่ได้
+  }
 
   http.end();
 
 }
 
-/* READ SCALE */
+/* SEND DATA */
 
-void readScale(){
+void sendData(float weight,int qty,String status){
 
-  float weight=scale.get_units(20);
+  HTTPClient http;
 
-  if(weight<3) weight=0;
+  http.begin(GAS_URL);
 
-  float perItem=products[currentProduct].weight;
+  http.addHeader("Content-Type","application/json");
 
-  int qty=weight/perItem;
+  float weight_g=weight;
+  float weight_kg=weight/1000;
 
-  int box=qty/products[currentProduct].perBox;
+  String json=
+  "{"
+  "\"mode\":\"save\","
+  "\"product_id\":\""+products[currentProduct].id+"\","
+  "\"name\":\""+products[currentProduct].name+"\","
+  "\"weight_kg\":"+String(weight_kg)+","
+  "\"weight_g\":"+String(weight_g)+","
+  "\"qty\":"+String(qty)+","
+  "\"status\":\""+status+"\""
+  "}";
 
-  /* weight stability */
+  Serial.println(json);
 
-  if(abs(weight-stableWeight)<2){
+  http.POST(json);
 
-    stableCount++;
-
-  }else{
-
-    stableCount=0;
-
-  }
-
-  stableWeight=weight;
-
-  /* LCD */
-
-  lcd.clear();
-
-  lcd.setCursor(0,0);
-  lcd.print(products[currentProduct].name);
-
-  lcd.setCursor(0,1);
-  lcd.print(qty);
-  lcd.print(" pcs");
-
-  /* BLYNK */
-
-  Blynk.virtualWrite(V0,weight);
-  Blynk.virtualWrite(V1,qty);
-  Blynk.virtualWrite(V2,box);
-  Blynk.virtualWrite(V3,products[currentProduct].name);
-
-  /* SEND DATA */
-
-  if(stableCount>=5){
-
-    if(qty!=lastQty){
-
-      if(millis()-lastSend>5000){
-
-        sendData(weight,qty,box);
-
-        lastQty=qty;
-        lastSend=millis();
-
-      }
-
-    }
-
-  }
+  http.end();
 
 }
 
-/* PRODUCT SELECT FROM BLYNK */
-
-BLYNK_WRITE(V4){
-
-  currentProduct=param.asInt();
-
-  Serial.print("Product changed to:");
-
-  Serial.println(products[currentProduct].name);
-
-}
-
-/* TARE BUTTON */
+/* BLYNK SELECT PRODUCT */
 
 BLYNK_WRITE(V5){
 
-  int state=param.asInt();
+  int index = param.asInt();
 
-  if(state==1){
-
-    scale.tare();
-
-    Serial.println("Tare Done");
-
+  if(index < productCount){
+    currentProduct = index;
+    Serial.print("Switch Product: ");
+    Serial.println(products[currentProduct].name);
   }
 
 }
+
+/* REFRESH PRODUCT */
+
+BLYNK_WRITE(V6){
+
+  getProducts();
+  Serial.println("Product List Refreshed");
+
+}
+
+/* SETUP */
 
 void setup(){
 
@@ -219,34 +205,128 @@ void setup(){
   lcd.init();
   lcd.backlight();
 
-  lcd.print("Smart Scale");
-
   scale.begin(DT,SCK);
-
   scale.set_scale(calibration_factor);
+
+  delay(2000);
 
   scale.tare();
 
+  Serial.println("Scale Ready");
+
   connectWiFi();
 
-  Blynk.begin(BLYNK_AUTH_TOKEN,ssid,pass);
+  delay(1000);                                        // ✅ แก้ไข #4: รอ WiFi เสถียรก่อนดึงข้อมูล
 
-  timer.setInterval(1000L,readScale);
+  getProducts();
+
+  /* BLYNK */
+
+  Blynk.config(BLYNK_AUTH_TOKEN);
+  Blynk.connect();
+
+  delay(500);                                         // ✅ แก้ไข #4: รอ Blynk เชื่อมต่อเสถียร
 
 }
 
+/* LOOP */
+
 void loop(){
-
-  if(millis()-lastWiFiCheck>10000){
-
-    connectWiFi();
-
-    lastWiFiCheck=millis();
-
-  }
 
   Blynk.run();
 
-  timer.run();
+  if(productCount==0) return;
+
+  /* READ WEIGHT */
+
+  if (!scale.is_ready()) {
+    Serial.println("HX711 not ready");
+    return;
+  }
+
+  float totalWeight = scale.get_units(20)*1000.0;
+
+  float weight = totalWeight - products[currentProduct].tare;
+
+  if(weight < 0.1) weight = 0;
+
+  float perItem = products[currentProduct].weight;
+
+  if(perItem <= 0){
+    Serial.println("ERROR: product weight = 0");
+    return;
+  }
+
+  int qty = weight / perItem;
+
+  Serial.print("Weight:");
+  Serial.print(weight);
+  Serial.print(" Qty:");
+  Serial.println(qty);
+
+  /* STATUS */
+
+  String status="NORMAL";
+
+  if(qty<products[currentProduct].low){
+    status="LOW STOCK";
+  }
+
+  /* LCD */
+
+  lcd.setCursor(0,0);
+  lcd.print(products[currentProduct].name);
+  lcd.print("      ");
+
+  lcd.setCursor(0,1);
+
+  if(status=="LOW STOCK"){
+    lcd.print("LOW ");
+    lcd.print(qty);
+    lcd.print(" pcs   ");
+  }else{
+    lcd.print(qty);
+    lcd.print(" pcs   ");
+  }
+
+  /* BLYNK */
+
+  Blynk.virtualWrite(V0,qty);
+  Blynk.virtualWrite(V1,weight);
+
+  if(status=="LOW STOCK"){
+    Blynk.virtualWrite(V3,1);
+  }else{
+    Blynk.virtualWrite(V3,0);
+  }
+
+  /* AUTO SAVE */
+
+  if(abs(weight-lastWeight)<2){
+
+    if(millis()-stableTimer>5000 && dataSaved==false){
+
+      if(qty>0){
+
+        sendData(weight,qty,status);
+
+        dataSaved=true;
+
+        Serial.println("DATA SAVED");
+
+      }
+
+    }
+
+  }else{
+
+    stableTimer=millis();
+    dataSaved=false;
+
+  }
+
+  lastWeight=weight;
+
+  delay(500);
 
 }
