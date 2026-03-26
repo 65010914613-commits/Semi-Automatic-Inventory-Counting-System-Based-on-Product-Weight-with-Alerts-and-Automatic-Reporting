@@ -1,183 +1,251 @@
-var CHANNEL_ACCESS_TOKEN = "fc6jsGfNnosig1uR0WKYMrYkXg9g+wgv9K2JA97xxis/WKBj3It4LbJaCRpRHPIpa56q4GlJcyOU9qDQ+EkljyKKLq1uutm5p1b45c+hWH7lofVkab/g/+5B00LpnYPmWcoyN0Y1ZKXFcuyQvxsEogdB04t89/1O/w1cDnyilFU=";
-var USER_ID = "U1a584b63b59f9f860386eef48d08a5bc";
+var CHANNEL_ACCESS_TOKEN="c1E9UnB6O22+SD9hiaHPFv4Ya61LnskniCRdXQ69tZ0QvlvM7hJlgrHWnBcQcDJ2TloQNGdE4oywHjd8SB0O39PyH7h8zJ0FVC0r9fm2N8h0gvSSqo0qMZVl1mMtyg7clOWNuHkCllM/jCvpSEah8AdB04t89/1O/w1cDnyilFU=";
+var USER_ID="U1a584b63b59f9f860386eef48d08a5bc";
+var SPREADSHEET_ID="1XFKr-EpaOvVoeuHyhjw-1AnLSZIsV8rPDWBAQ1CJZ-o";
 
-var lastAlert = {};
+/* ========================= */
+/* API */
+/* ========================= */
 
 function doPost(e){
 
-  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Sheet1");
+  try{
+    var data = JSON.parse(e.postData.contents);
+  }catch(err){
+    return ContentService.createTextOutput("Invalid JSON");
+  }
 
-  var data = JSON.parse(e.postData.contents);
-
-  /* =========================
-     1️⃣ ถ้ามาจาก LINE
-  ==========================*/
-
+  /* LINE */
   if(data.events){
-
+    var text = data.events[0].message.text;
     var replyToken = data.events[0].replyToken;
-    var userText = data.events[0].message.text;
 
-    var result = checkStock(userText);
-
+    var result = processCommand(text);
     replyLine(replyToken,result);
 
     return ContentService.createTextOutput("OK");
-
   }
 
-  /* =========================
-     2️⃣ ถ้ามาจาก ESP32
-  ==========================*/
+  /* ESP32 */
+  if(data.mode=="save"){
+    return saveData(data);
+  }
 
-  var timestamp = new Date();
+  return ContentService.createTextOutput("NO ACTION");
+}
+function doGet(e) {
+  var mode = e.parameter.mode;
 
-  var product_id = data.product_id;
-  var product_name = data.product_name;
-  var weight = Number(data.weight);
-  var quantity = Number(data.quantity);
-  var box = Number(data.box);
+  if (mode == "product") {
+    return getProductList();
+  }
 
-  sheet.appendRow([
-    timestamp,
-    product_id,
-    product_name,
-    weight,
-    quantity,
-    box
-  ]);
-
-  checkLowStock(product_name, quantity);
-
-  return ContentService.createTextOutput("OK");
-
+  return ContentService.createTextOutput("NO ACTION");
 }
 
-/* =========================
-   ค้นหา Stock
-=========================*/
-
-function checkStock(productName){
-
-  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Sheet1");
-
+function getProductList() {
+  var sheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName("Product");
   var data = sheet.getDataRange().getValues();
 
-  var qty = null;
+  var products = [];
 
-  for(var i=data.length-1;i>=1;i--){
+  for (var i = 1; i < data.length; i++) {
+    products.push({
+      id:      data[i][0],
+      name:    data[i][1],
+      weight:  data[i][2],
+      perbox:  data[i][3],
+      tare:    data[i][4],
+      low:     data[i][5]
+    });
+  }
 
-    if(data[i][2].toString().toLowerCase() == productName.toLowerCase()){
+  return ContentService
+    .createTextOutput(JSON.stringify(products))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+/* ========================= */
+/* SAVE DATA */
+/* ========================= */
 
-      qty = data[i][4];
-      break;
+function saveData(data){
+
+var sheet=SpreadsheetApp
+.openById(SPREADSHEET_ID)
+.getSheetByName("DATA");
+
+var timestamp=new Date();
+
+sheet.appendRow([
+timestamp,
+data.product_id,
+data.name,
+data.weight_kg,
+data.weight_g,
+data.qty,
+data.status
+]);
+
+/* ========================= */
+/* 🔥 แจ้งเตือนทันที */
+/* ========================= */
+
+var low = getLowStock(data.product_id);
+
+Logger.log("QTY: "+data.qty+" LOW: "+low);
+
+/* 🔥 เช็คจาก qty จริง (ไม่ใช้ status) */
+
+if(Number(data.qty) <= Number(low)){
+
+  sendLine(
+    "⚠️ STOCK LOW\n\n"+
+    "รหัส: "+data.product_id+
+    "\nสินค้า: "+data.name+
+    "\nเหลือ: "+data.qty+" ชิ้น"
+  );
+
+}
+
+return ContentService.createTextOutput("OK");
+
+}
+
+
+/* ========================= */
+/* GET LOW */
+/* ========================= */
+
+function getLowStock(product_id){
+
+  var sheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName("Product");
+  var data = sheet.getDataRange().getValues();
+
+  for(var i=1;i<data.length;i++){
+    if(data[i][0]==product_id){
+      return data[i][5];
+    }
+  }
+
+  return 0;
+}
+
+/* ========================= */
+/* COMMAND */
+/* ========================= */
+
+function processCommand(text){
+
+  text = text.toLowerCase().trim();
+
+  if(text=="stock"){
+    return getAllStock();
+  }
+
+  return getStock(text);
+}
+
+/* ========================= */
+
+function getStock(product){
+
+  var sheet=SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName("DATA");
+  var data=sheet.getDataRange().getValues();
+
+  var latest=null;
+
+  for(var i=1;i<data.length;i++){
+
+    if(data[i][2].toString().toLowerCase()==product){
+
+      if(!latest || data[i][0] > latest.time){
+        latest = {
+          qty:data[i][5],
+          time:data[i][0]
+        };
+      }
 
     }
-
   }
 
-  if(qty == null){
-
-    return "ไม่พบสินค้า "+productName;
-
+  if(latest){
+    return "📦 "+product+"\nเหลือ "+latest.qty+" ชิ้น";
   }
 
-  return productName+" คงเหลือ "+qty+" ชิ้น";
-
+  return "❌ ไม่พบสินค้า";
 }
 
-/* =========================
-   แจ้งเตือน Stock ต่ำ
-=========================*/
+/* ========================= */
 
-function checkLowStock(product, quantity){
+function getAllStock(){
 
-  var threshold = 50;
+  var sheet=SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName("DATA");
+  var data=sheet.getDataRange().getValues();
 
-  if(quantity < threshold){
+  var list={};
 
-    if(lastAlert[product] == quantity){
-      return;
+  for(var i=1;i<data.length;i++){
+
+    var name = data[i][2];
+    var time = data[i][0];
+
+    if(!list[name] || time > list[name].time){
+      list[name] = {
+        qty:data[i][5],
+        time:time
+      };
     }
-
-    lastAlert[product] = quantity;
-
-    var message =
-    "⚠️ Stock ต่ำ\n\n"+
-    "สินค้า: "+product+"\n"+
-    "คงเหลือ: "+quantity+" ชิ้น";
-
-    sendLineOA(message);
-
   }
 
+  var msg="📦 Inventory\n\n";
+
+  for(var key in list){
+    msg += key+" : "+list[key].qty+" ชิ้น\n";
+  }
+
+  return msg;
 }
 
-/* =========================
-   ส่งแจ้งเตือน LINE
-=========================*/
+/* ========================= */
 
-function sendLineOA(message){
+function sendLine(message){
 
-  var url = "https://api.line.me/v2/bot/message/push";
-
-  var payload = {
-    "to": USER_ID,
-    "messages":[
-      {
-        "type":"text",
-        "text": message
-      }
-    ]
-  };
-
-  var options = {
-    "method":"post",
-    "headers":{
+  UrlFetchApp.fetch("https://api.line.me/v2/bot/message/push",{
+    method:"post",
+    headers:{
       "Content-Type":"application/json",
-      "Authorization":"Bearer " + CHANNEL_ACCESS_TOKEN
+      "Authorization":"Bearer "+CHANNEL_ACCESS_TOKEN
     },
-    "payload": JSON.stringify(payload)
-  };
-
-  UrlFetchApp.fetch(url, options);
+    payload:JSON.stringify({
+      to:USER_ID,
+      messages:[{type:"text",text:message}]
+    })
+  });
 
 }
 
-/* =========================
-   ตอบ LINE เมื่อถาม Stock
-=========================*/
+/* ========================= */
 
-function replyLine(replyToken,message){
+function replyLine(token,message){
 
-  var url = "https://api.line.me/v2/bot/message/reply";
-
-  var payload = {
-
-    replyToken: replyToken,
-
-    messages:[
-      {
-        "type":"text",
-        "text": message
-      }
-    ]
-
-  };
-
-  var options = {
-
-    "method":"post",
-
-    "headers":{
+  UrlFetchApp.fetch("https://api.line.me/v2/bot/message/reply",{
+    method:"post",
+    headers:{
       "Content-Type":"application/json",
-      "Authorization":"Bearer " + CHANNEL_ACCESS_TOKEN
+      "Authorization":"Bearer "+CHANNEL_ACCESS_TOKEN
     },
+    payload:JSON.stringify({
+      replyToken:token,
+      messages:[{type:"text",text:message}]
+    })
+  });
 
-    "payload": JSON.stringify(payload)
+}
+/* 👇 วางตรงนี้เลย */
 
-  };
+function sendDailyReport(){
 
-  UrlFetchApp.fetch(url, options);
+  var msg = getAllStock();
+
+  sendLine("📊 รายงานสต็อกล่าสุด\n\n"+msg);
 
 }
